@@ -1,6 +1,27 @@
 # Building BMM Containers
 
 This section provides instructions for building the containers for NVIDIA Bare Metal Manager (BMM).
+For the complete deployment workflow, see the [End-to-End Installation Guide](installation-guide.md).
+
+## Container Image Summary
+
+The following table lists all container images produced by this build process:
+
+| Image Name | Dockerfile | Purpose | Architecture |
+|------------|-----------|---------|-------------|
+| `bmm-buildcontainer-x86_64` | `dev/docker/Dockerfile.build-container-x86_64` | Intermediate build container (Rust toolchain, libraries) | x86_64 |
+| `bmm-runtime-container-x86_64` | `dev/docker/Dockerfile.runtime-container-x86_64` | Intermediate runtime base image | x86_64 |
+| `bmm` (nvmetal-carbide) | `dev/docker/Dockerfile.release-container-sa-x86_64` | Carbide API, DHCP, DNS, PXE, hardware health, SSH console | x86_64 |
+| `boot-artifacts-x86_64` | `dev/docker/Dockerfile.release-artifacts-x86_64` | PXE boot artifacts for x86 hosts | x86_64 |
+| `boot-artifacts-aarch64` | `dev/docker/Dockerfile.release-artifacts-aarch64` | PXE boot artifacts for DPU BFB provisioning | x86_64 (bundles aarch64 binaries) |
+| `machine-validation-runner` | `dev/docker/Dockerfile.machine-validation-runner` | Machine validation / burn-in test runner | x86_64 |
+| `machine-validation-config` | `dev/docker/Dockerfile.machine-validation-config` | Machine validation config (bundles runner tar) | x86_64 |
+| `build-artifacts-container-cross-aarch64` | `dev/docker/Dockerfile.build-artifacts-container-cross-aarch64` | Intermediate cross-compile container for aarch64 | x86_64 |
+
+The intermediate images (`bmm-buildcontainer-x86_64`, `bmm-runtime-container-x86_64`,
+`build-artifacts-container-cross-aarch64`) are used during the build process and do not
+need to be pushed to your registry. The remaining images must be pushed to a registry
+accessible by your Kubernetes cluster.
 
 ## Installing Prerequisite Software
 
@@ -55,27 +76,34 @@ cargo make --cwd pxe --env SA_ENABLEMENT=1 build-boot-artifacts-x86-host-sa
 docker build --build-arg "CONTAINER_RUNTIME_X86_64=alpine:latest" -t boot-artifacts-x86_64 -f dev/docker/Dockerfile.release-artifacts-x86_64 .
 ```
 
-## Building the Machine Validation images
+## Building the Machine Validation Images
 
 ```sh
-docker build --build-arg CONTAINER_RUNTIME_X86_64=bmm-runtime-container-x86_64 -t machine-validation-runner -f dev/docker/Dockerfile.machine-validation-runner .
+docker build --build-arg CONTAINER_RUNTIME_X86_64=bmm-runtime-container-x86_64 \
+  -t machine-validation-runner -f dev/docker/Dockerfile.machine-validation-runner .
 
-docker save --output crates/machine-validation/images/machine-validation-runner.tar machine-validation-runner:latest 
+docker save --output crates/machine-validation/images/machine-validation-runner.tar \
+  machine-validation-runner:latest
 
-// This copies `machine-validation-runner.tar` into the `/images` directory on the `machine-validation-config` container.  When using a kubernetes deployment model
-// this is the only `machine-validation` container you need to configure on the `carbide-pxe` pod.
-
-docker build --build-arg CONTAINER_RUNTIME_X86_64=bmm-runtime-container-x86_64 -t machine-validation-config -f dev/docker/Dockerfile.machine-validation-config .
-
+docker build --build-arg CONTAINER_RUNTIME_X86_64=bmm-runtime-container-x86_64 \
+  -t machine-validation-config -f dev/docker/Dockerfile.machine-validation-config .
 ```
 
-## Building bmm-core container
+The `machine-validation-config` container bundles `machine-validation-runner.tar` into its
+`/images` directory. In a Kubernetes deployment, this is the only machine-validation
+container you need to configure on the `carbide-pxe` pod.
+
+## Building bmm-core Container
 
 ```sh
-docker build --build-arg "CONTAINER_RUNTIME_X86_64=bmm-runtime-container-x86_64" --build-arg "CONTAINER_BUILD_X86_64=bmm-buildcontainer-x86_64" -f dev/docker/Dockerfile.release-container-sa-x86_64 -t bmm .
+docker build \
+  --build-arg "CONTAINER_RUNTIME_X86_64=bmm-runtime-container-x86_64" \
+  --build-arg "CONTAINER_BUILD_X86_64=bmm-buildcontainer-x86_64" \
+  -f dev/docker/Dockerfile.release-container-sa-x86_64 \
+  -t bmm .
 ```
 
-## Building the AARCH64 Containers and artifacts
+## Building the AARCH64 Containers and Artifacts
 
 ### Building the Cross-compile container
 
@@ -144,3 +172,75 @@ docker build --build-arg "CONTAINER_RUNTIME_AARCH64=alpine:latest" -t boot-artif
 ```
 
 **NOTE**: The `CONTAINER_RUNTIME_AARCH64=alpine:latest` build argument must be included. The aarch64 binaries are bundled into an x86 container.
+
+## Tagging and Pushing to a Private Registry
+
+After building all images, tag them for your private registry and push. Set your
+registry URL and version tag as environment variables:
+
+```sh
+REGISTRY=<your-registry.example.com/carbide>
+TAG=<your-version-tag>
+```
+
+### Authenticate with your registry (if not already done)
+
+```sh
+docker login <your-registry.example.com>
+```
+
+### Tag the deployable images
+
+```sh
+docker tag bmm $REGISTRY/nvmetal-carbide:$TAG
+docker tag boot-artifacts-x86_64 $REGISTRY/boot-artifacts-x86_64:$TAG
+docker tag boot-artifacts-aarch64 $REGISTRY/boot-artifacts-aarch64:$TAG
+docker tag machine-validation-config $REGISTRY/machine-validation-config:$TAG
+```
+
+### Push to your registry
+
+```sh
+docker push $REGISTRY/nvmetal-carbide:$TAG
+docker push $REGISTRY/boot-artifacts-x86_64:$TAG
+docker push $REGISTRY/boot-artifacts-aarch64:$TAG
+docker push $REGISTRY/machine-validation-config:$TAG
+```
+
+## Building BMM REST Containers
+
+The BMM REST components (cloud-api, cloud-workflow, site-manager, site-agent,
+db migrations, cert-manager) are built from the
+[bare-metal-manager-rest](https://github.com/NVIDIA/bare-metal-manager-rest) repository.
+
+### Prerequisites
+
+* Go 1.25.4 or later
+* Docker 20.10+ with BuildKit enabled
+
+### Build all REST images
+
+```sh
+cd bare-metal-manager-rest
+make docker-build IMAGE_REGISTRY=$REGISTRY IMAGE_TAG=$TAG
+```
+
+### Push REST images
+
+```sh
+for image in carbide-rest-api carbide-rest-workflow carbide-rest-site-manager \
+             carbide-rest-site-agent carbide-rest-db carbide-rest-cert-manager; do
+    docker push "$REGISTRY/$image:$TAG"
+done
+```
+
+### REST Image Summary
+
+| Image | Purpose |
+|-------|---------|
+| `carbide-rest-api` | REST API server (port 8388) |
+| `carbide-rest-workflow` | Temporal workflow worker (cloud-worker, site-worker) |
+| `carbide-rest-site-manager` | Site management / registry service |
+| `carbide-rest-site-agent` | On-site agent (elektra) |
+| `carbide-rest-db` | Database migration job (runs once per upgrade) |
+| `carbide-rest-cert-manager` | Native PKI certificate manager (credsmgr) |

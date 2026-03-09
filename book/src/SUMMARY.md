@@ -3,7 +3,7 @@
 - [Introduction](README.md)
 - [Hardware Compatbility List](hcl.md)
 - [Release Notes](release-notes.md)
-- [FAQs](faqs.md)
+- [FAQs](faq.md)
 
 # Architecture
 
@@ -23,6 +23,7 @@
 
 # Manuals
 
+- [End-to-End Installation Guide](manuals/installation-guide.md)
 - [Site Setup](manuals/site-setup.md)
     - [Site Reference Architecture](manuals/site-reference-arch.md)
 - [Building BMM Containers](manuals/building_bmm_containers.md)
